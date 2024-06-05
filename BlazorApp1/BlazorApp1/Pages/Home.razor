@@ -1,0 +1,108 @@
+﻿@page "/"
+@using Microsoft.CodeAnalysis
+@using Microsoft.CodeAnalysis.CSharp
+@using System.Reflection
+
+@inject HttpClient Client
+
+Click the button to attempt to build:
+
+<pre>
+	@Code
+</pre>
+
+<button class="btn btn-primary m-1" @onclick="Run">Run</button>
+
+<p>Result: @Result</p>
+
+<p>Errors:</p>
+@foreach (var diagnostic in Diagnostics)
+{
+	<p>@diagnostic</p>
+}
+
+@code
+{
+	private const string Code = @"using System;
+
+namespace Repro
+{
+	class Foo
+	{
+		public void Main()
+		{
+			int i = 5;
+			Console.WriteLine(i);
+		}
+	}
+}";
+
+	private MetadataReference[] _references;
+
+	private string Result { get; set; }
+	private string[] Diagnostics { get; set; } = Array.Empty<string>();
+
+	private void Run()
+	{
+		Result = string.Empty;
+
+		var syntaxTree = CSharpSyntaxTree.ParseText(Code);
+		var assemblyPath = Path.ChangeExtension(Path.GetTempFileName(), "dll");
+
+		var compilation = CSharpCompilation.Create(Path.GetFileName(assemblyPath))
+			.WithOptions(new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary))
+			.AddReferences(_references)
+			.AddSyntaxTrees(syntaxTree);
+
+		using var dllStream = new MemoryStream();
+		using var pdbStream = new MemoryStream();
+		using var xmlStream = new MemoryStream();
+		var emitResult = compilation.Emit(dllStream, pdbStream, xmlStream);
+		if (!emitResult.Success)
+		{
+			Result = "Compilation failure";
+			Diagnostics = emitResult.Diagnostics.Select(x => x.GetMessage()).ToArray();
+			return;
+		}
+
+		var assembly = Assembly.Load(dllStream.ToArray());
+
+		// run the code
+
+		Result = "Success!!!";
+	}
+
+	protected override async Task OnInitializedAsync()
+	{
+		await LoadAssemblyReferences();
+
+		await base.OnInitializedAsync();
+	}
+
+	private async Task LoadAssemblyReferences()
+	{
+		var refs = AppDomain.CurrentDomain.GetAssemblies();
+
+		var references = new MetadataReference[refs.Length];
+
+		int i = 0;
+		foreach (var reference in refs.Where(x => !x.IsDynamic))
+		{
+			Console.WriteLine($"{reference.FullName}\n  Location - {reference.Location}\n");
+			var source = $"/_framework/{reference.FullName!.Split(',')[0]}.wasm";
+			try
+			{
+				var stream = await Client.GetStreamAsync(source);
+				references[i] = MetadataReference.CreateFromStream(stream);
+				i++;
+			}
+			catch (Exception e)
+			{
+				Console.WriteLine(e);
+				Console.WriteLine(source);
+			}
+		}
+
+		_references = references;
+	}
+}
